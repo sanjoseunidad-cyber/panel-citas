@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Citas IESS remoto</title>
+<!--
+  Panel remoto de Citas IESS. Esta página no contiene datos: la clave llega una sola vez
+  en el fragmento (#k=...) desde el panel de casa, se guarda en este celular y nunca se
+  envía a ningún servidor. La PC y esta página se hablan por ntfy.sh con mensajes cifrados
+  (AES-256-GCM); ntfy solo ve bloques ilegibles. La contraparte en la PC es remoto.js.
+-->
+<style>
+body{font-family:system-ui,sans-serif;margin:0;padding:12px;background:#f3f5f9;color:#111}
+#estado{font-weight:600;padding:10px;border-radius:8px;background:#dfe9ff;margin-bottom:6px}
+#aviso{padding:8px 10px;border-radius:8px;margin-bottom:8px;font-size:15px;display:none}
+#aviso.espera{display:block;background:#fff4d6}
+#aviso.error{display:block;background:#ffdede}
+#hora{color:#555;font-size:13px;margin-bottom:6px}
+#chat{width:100%;border:1px solid #ccc;border-radius:8px;background:#fff;touch-action:manipulation;min-height:120px}
+.fila{display:flex;gap:8px;margin:10px 0}
+button{font-size:17px;padding:12px;border-radius:8px;border:0;background:#0b57d0;color:#fff;flex:1}
+button.sec{background:#5f6b7a}
+#botones button{display:block;width:100%;margin:6px 0;background:#1b7f3b}
+input{font-size:17px;padding:12px;border-radius:8px;border:1px solid #999;flex:3;min-width:0}
+small{color:#555;display:block;margin-bottom:6px}
+#sinClave{display:none;padding:14px;background:#fff;border-radius:8px;line-height:1.4}
+</style>
+</head>
+<body>
+<div id="sinClave">
+  <b>Este celular todavía no está activado.</b><br>
+  Estando en casa, en el mismo Wi-Fi de la PC, abre el panel de casa y toca
+  «📱 Activar acceso desde fuera de casa en este celular». Se hace una sola vez.
+</div>
+<div id="panel">
+  <div id="estado">Conectando…</div>
+  <div id="aviso"></div>
+  <div id="hora"></div>
+  <small>Es el mismo chat de Edge en la PC. Toca sobre la imagen para tocar en el chat (captcha, botones, fechas). La imagen se actualiza sola unos segundos después de cada acción.</small>
+  <img id="chat" alt="chat">
+  <div class="fila"><button class="sec" onclick="enviar('scroll',{d:-400})">▲ Subir</button><button class="sec" onclick="enviar('scroll',{d:400})">▼ Bajar</button><button class="sec" onclick="enviar('ver')">🔄 Actualizar</button></div>
+  <div class="fila"><input id="txt" placeholder="Escribe aquí (cédula, fecha…)"><button onclick="enviarTexto()">Enviar</button></div>
+  <div id="botones"></div>
+</div>
+<script>
+const NTFY = 'https://ntfy.sh'
+const te = new TextEncoder(), td = new TextDecoder()
+const $ = id => document.getElementById(id)
+const unir = (a, b) => { const r = new Uint8Array(a.length + b.length); r.set(a); r.set(b, a.length); return r }
+const aB64 = u8 => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s) }
+const deB64 = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0))
+const hex = u8 => Array.from(u8, b => b.toString(16).padStart(2, '0')).join('')
+
+let clave, temaPC, temaCel, fuente
+let ultimaHora = 0      // hora de la captura mostrada (para ignorar capturas viejas)
+let esperandoDesde = 0  // hora de la última orden sin respuesta
+let temporizadorEspera
+
+// La clave llega una vez en #k=... y queda guardada en este celular; se borra de la barra de direcciones
+function leerSecreto() {
+  const m = /k=([A-Za-z0-9_-]+)/.exec(location.hash)
+  try {
+    if (m) { localStorage.setItem('iessClave', m[1]); history.replaceState(null, '', location.pathname) }
+    return localStorage.getItem('iessClave')
+  } catch { return m && m[1] }
+}
+
+// Misma derivación que remoto.js: sha256(secreto | etiqueta)
+async function derivar(secreto) {
+  const h = async s => new Uint8Array(await crypto.subtle.digest('SHA-256', unir(secreto, te.encode(s))))
+  clave = await crypto.subtle.importKey('raw', await h('cifrado'), 'AES-GCM', false, ['encrypt', 'decrypt'])
+  temaPC = 'iess-' + hex((await h('tema-pc')).subarray(0, 12))
+  temaCel = 'iess-' + hex((await h('tema-cel')).subarray(0, 12))
+}
+
+async function cifrar(u8) {
+  const iv = crypto.getRandomValues(new Uint8Array(12))
+  return unir(iv, new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, clave, u8)))
+}
+async function descifrar(u8) {
+  return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: u8.subarray(0, 12) }, clave, u8.subarray(12)))
+}
+
+function aviso(texto, tipo) { const a = $('aviso'); a.textContent = texto || ''; a.className = texto ? tipo : '' }
+
+function mostrar(d) {
+  if (d.hora <= ultimaHora) return
+  ultimaHora = d.hora
+  $('chat').src = 'data:image/jpeg;base64,' + d.img
+  $('estado').textContent = d.estado
+  $('hora').textContent = 'Imagen de las ' + new Date(d.hora).toLocaleTimeString('es-EC')
+  const c = $('botones'); c.innerHTML = ''
+  d.botones.forEach((b, i) => { const e = document.createElement('button'); e.textContent = b; e.onclick = () => enviar('boton', { i }); c.appendChild(e) })
+  if (esperandoDesde && d.hora >= esperandoDesde) { esperandoDesde = 0; clearTimeout(temporizadorEspera); aviso('') }
+}
+
+// Un mensaje de ntfy con adjunto = una captura cifrada de la PC
+async function procesar(ev) {
+  if (ev.event !== 'message' || !ev.attachment) return
+  if (ev.attachment.expires && ev.attachment.expires * 1000 < Date.now()) return
+  try {
+    const buf = new Uint8Array(await (await fetch(ev.attachment.url)).arrayBuffer())
+    mostrar(JSON.parse(td.decode(await descifrar(buf))))
+  } catch (e) { /* no es nuestro o expiró */ }
+}
+
+function escuchar() {
+  if (fuente && fuente.readyState !== 2) return
+  fuente = new EventSource(`${NTFY}/${temaPC}/sse`)
+  fuente.onmessage = e => procesar(JSON.parse(e.data))
+}
+
+async function enviar(a, datos = {}) {
+  if (!clave) return
+  try {
+    const orden = await cifrar(te.encode(JSON.stringify({ a, ...datos, ts: Date.now() })))
+    const r = await fetch(`${NTFY}/${temaCel}`, { method: 'POST', body: aB64(orden) })
+    if (r.status === 429) return aviso('⚠️ Se alcanzó el límite diario de mensajes de ntfy. Prueba más tarde.', 'error')
+    if (!r.ok) throw new Error('ntfy respondió ' + r.status)
+    esperandoDesde = Date.now() - 5000 // tolera diferencias de reloj entre PC y celular
+    aviso('⏳ Enviado. Esperando la imagen de la PC…', 'espera')
+    clearTimeout(temporizadorEspera)
+    temporizadorEspera = setTimeout(() => aviso('⚠️ La PC no respondió. ¿Está encendida, con Internet y con el programa abierto?', 'error'), 25000)
+  } catch (e) {
+    aviso('⚠️ No se pudo enviar (¿sin Internet en el celular?): ' + e.message, 'error')
+  }
+}
+
+function enviarTexto() { const i = $('txt'); if (!i.value) return; enviar('texto', { texto: i.value }); i.value = '' }
+$('txt').addEventListener('keydown', e => { if (e.key === 'Enter') enviarTexto() })
+$('chat').onclick = e => {
+  if (!ultimaHora) return
+  const r = e.target.getBoundingClientRect()
+  enviar('tap', { fx: (e.clientX - r.left) / r.width, fy: (e.clientY - r.top) / r.height })
+}
+
+// Al volver a la página (desde otra app o un aviso) se reconecta y pide una imagen nueva
+document.addEventListener('visibilitychange', () => { if (!document.hidden && clave) { escuchar(); enviar('ver') } })
+
+;(async () => {
+  const s = leerSecreto()
+  if (!s) { $('panel').style.display = 'none'; $('sinClave').style.display = 'block'; return }
+  await derivar(deB64(s))
+  escuchar()
+  // Mostrar de inmediato la última imagen guardada mientras llega una nueva
+  fetch(`${NTFY}/${temaPC}/json?poll=1&since=latest`).then(r => r.text())
+    .then(t => t.split('\n').filter(Boolean).forEach(l => procesar(JSON.parse(l)))).catch(() => {})
+  enviar('ver')
+})()
+</script>
+</body>
+</html>
