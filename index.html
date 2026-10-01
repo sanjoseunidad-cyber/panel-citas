@@ -22,6 +22,7 @@ body{font-family:system-ui,sans-serif;margin:0;padding:12px;background:#f3f5f9;c
 .fila{display:flex;gap:8px;margin:10px 0}
 button{font-size:17px;padding:12px;border-radius:8px;border:0;background:#0b57d0;color:#fff;flex:1}
 button.sec{background:#5f6b7a}
+#opciones{margin-top:14px;padding:10px;border-radius:10px;border:2px solid #1b7f3b;background:#fff}
 #botones button{display:block;width:100%;margin:6px 0;background:#1b7f3b}
 input{font-size:17px;padding:12px;border-radius:8px;border:1px solid #999;flex:3;min-width:0}
 small{color:#555;display:block;margin-bottom:6px}
@@ -40,9 +41,13 @@ small{color:#555;display:block;margin-bottom:6px}
   <div id="hora"></div>
   <small>Es el mismo chat de Edge en la PC. Toca sobre la imagen para tocar en el chat (captcha, botones, fechas). La imagen se actualiza sola unos segundos después de cada acción.</small>
   <img id="chat" alt="chat">
-  <div class="fila"><button class="sec" onclick="enviar('scroll',{d:-400})">▲ Subir</button><button class="sec" onclick="enviar('scroll',{d:400})">▼ Bajar</button><button class="sec" onclick="enviar('ver')">🔄 Actualizar</button></div>
+  <div class="fila"><button class="sec" onclick="enviar('scroll',{d:-400})">▲ Subir</button><button class="sec" onclick="enviar('scroll',{d:400})">▼ Bajar</button><button class="sec" onclick="enviar('ver')">📷 Ver imagen nueva</button></div>
   <div class="fila"><input id="txt" placeholder="Escribe aquí (cédula, fecha…)"><button onclick="enviarTexto()">Enviar</button></div>
-  <div id="botones"></div>
+  <div id="opciones">
+    <b>Opciones del chat del IESS</b>
+    <small>Tocar una de estas la envía al IESS.</small>
+    <div id="botones"></div>
+  </div>
 </div>
 <script>
 const NTFY = 'https://ntfy.sh'
@@ -94,6 +99,10 @@ function mostrar(d) {
   const c = $('botones'); c.innerHTML = ''
   d.botones.forEach((b, i) => { const e = document.createElement('button'); e.textContent = b; e.onclick = () => enviar('boton', { i }); c.appendChild(e) })
   if (esperandoDesde && d.hora >= esperandoDesde) { esperandoDesde = 0; clearTimeout(temporizadorEspera); aviso('') }
+  // La PC no tocó una opción delicada (cancelar, re agendar, actualizar datos) y pide confirmación
+  const p = d.pregunta
+  if (p && Date.now() - d.hora < 120000)
+    setTimeout(() => { if (confirm('¿Seguro que quieres tocar «' + p.texto + '» en el chat del IESS?')) enviar(p.a, { ...p.datos, confirmar: true }) }, 300)
 }
 
 // Un mensaje de ntfy con adjunto = una captura cifrada de la PC
@@ -130,8 +139,12 @@ async function enviar(a, datos = {}) {
 
 function enviarTexto() { const i = $('txt'); if (!i.value) return; enviar('texto', { texto: i.value }); i.value = '' }
 $('txt').addEventListener('keydown', e => { if (e.key === 'Enter') enviarTexto() })
+// Solo cuenta un toque real: dedo o mouse apoyado sobre la imagen justo antes del clic
+let apoyo = 0
+$('chat').addEventListener('pointerdown', e => { if (e.isTrusted) apoyo = Date.now() })
 $('chat').onclick = e => {
-  if (!ultimaHora) return
+  if (!ultimaHora || !e.isTrusted || Date.now() - apoyo > 1500) return
+  apoyo = 0
   const r = e.target.getBoundingClientRect()
   enviar('tap', { fx: (e.clientX - r.left) / r.width, fy: (e.clientY - r.top) / r.height })
 }
